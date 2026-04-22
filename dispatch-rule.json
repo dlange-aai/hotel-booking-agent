@@ -1,0 +1,15 @@
+{
+  "dispatch_rule": {
+    "name": "hotel-booking-dispatch",
+    "rule": {
+      "dispatchRuleIndividual": {
+        "roomPrefix": "hotel-"
+      }
+    },
+    "roomConfig": {
+      "agents": [
+        { "agentName": "hotel-booking-agent" }
+      ]
+    }
+  }
+}

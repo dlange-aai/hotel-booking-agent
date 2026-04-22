@@ -1,0 +1,5 @@
+livekit-agents[anthropic,assemblyai,cartesia,silero]~=1.5
+livekit-plugins-deepgram~=1.5
+livekit-plugins-turn-detector~=1.0
+livekit-plugins-noise-cancellation~=0.2
+python-dotenv
