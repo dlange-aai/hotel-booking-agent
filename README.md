@@ -51,6 +51,22 @@ The quickest path is [LiveKit Phone Numbers](https://docs.livekit.io/telephony/s
 
 Requires the [LiveKit CLI](https://docs.livekit.io/reference/developer-tools/livekit-cli/) (`lk`), authenticated against the same project as your `.env` keys.
 
+### 0. Install and authenticate the LiveKit CLI
+
+```bash
+# macOS
+brew install livekit-cli
+
+# Linux
+curl -sSL https://get.livekit.io/cli | bash
+```
+
+Then authenticate against your LiveKit Cloud project:
+
+```bash
+lk cloud auth
+```
+
 ### 1. Buy a phone number
 
 ```bash
