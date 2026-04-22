@@ -173,9 +173,7 @@ async def entrypoint(ctx: agents.JobContext):
         tts=cartesia.TTS(model="sonic-3", voice="607167f6-9bf2-473c-accc-ac7b3b66b30b"),
         llm=anthropic.LLM(model="claude-sonnet-4-5-20250929"),
         vad=silero.VAD.load(
-            activation_threshold=0.3,
-            min_speech_duration=0.4,
-            min_silence_duration=0.6,
+            activation_threshold=0.3
         ),
         turn_handling={
             "turn_detection": EnglishModel(),
