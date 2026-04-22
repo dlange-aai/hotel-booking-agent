@@ -99,13 +99,24 @@ Start the agent (`python hotel_agent.py dev` or `python hotel_agent_deepgram.py 
 
 > Both scripts register as `agent_name="hotel-booking-agent"`, so a single dispatch rule and phone number serve whichever variant is currently running — just don't run both at once.
 
-## Transcripts
+## Transcripts and recordings
 
-Each session appends to a new file under `transcripts/`:
-- `YYYY-MM-DD_HHMMSS.jsonl` for the AAI variant
-- `dg_YYYY-MM-DD_HHMMSS.jsonl` for the Deepgram variant
+Each session writes a pair of artifacts into its own timestamped folder:
 
-One JSON object per line. Event types include `START_OF_SPEECH`, `END_OF_SPEECH`, `interim_transcript`, `preflight_transcript`, `final_transcript`, `user_state_changed`, `agent_state_changed`, `user_input_transcribed`, `agent_false_interruption`, `speech_created`, and `config_update` (when the booking-mode tools fire).
+```
+transcripts/
+├── assembly/
+│   └── 2026-04-22_143012/
+│       ├── session.jsonl
+│       └── session.wav
+└── deepgram/
+    └── 2026-04-22_143012/
+        ├── session.jsonl
+        └── session.wav
+```
+
+- `session.jsonl` — one JSON object per line. Event types include `START_OF_SPEECH`, `END_OF_SPEECH`, `interim_transcript`, `preflight_transcript`, `final_transcript`, `user_state_changed`, `agent_state_changed`, `user_input_transcribed`, `agent_false_interruption`, `speech_created`, and `config_update` (when the booking-mode tools fire).
+- `session.wav` — 16 kHz stereo PCM. Caller on the left channel, agent on the right. Useful for playing back alongside the JSONL to see which gate fired when.
 
 ## Tuning knobs
 

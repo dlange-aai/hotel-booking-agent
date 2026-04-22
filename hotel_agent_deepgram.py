@@ -9,16 +9,13 @@ See README.md for setup. Environment variables live in .env (see .env.example).
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import AsyncIterable
-from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
 from livekit import agents, rtc
 from livekit.agents import AgentSession, Agent, room_io
-from livekit.agents.stt import SpeechEvent, SpeechEventType
 from livekit.agents.voice import ModelSettings
 from livekit.agents.voice.events import (
     AgentFalseInterruptionEvent,
@@ -32,84 +29,18 @@ from livekit.plugins import (
     cartesia,
     deepgram,
     noise_cancellation,
+    openai,
     silero,
 )
 from livekit.plugins.turn_detector.english import EnglishModel
 
+from recording import Session
+
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
-logger = logging.getLogger("hotel-booking-agent-deepgram")
-logger.setLevel(logging.DEBUG)
+logging.getLogger("hotel-booking-agent").setLevel(logging.DEBUG)
 
-# ---------------------------------------------------------------------------
-# Transcript logger — writes to both console and a timestamped JSONL file
-# ---------------------------------------------------------------------------
 TRANSCRIPTS_DIR = Path(__file__).resolve().parent / "transcripts"
-TRANSCRIPTS_DIR.mkdir(exist_ok=True)
-LOG_FILE = TRANSCRIPTS_DIR / f"dg_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.jsonl"
 
-
-def log_event(event_type: str, **data):
-    """Log an event to console and append to JSONL file."""
-    entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "event": event_type,
-        **data,
-    }
-    logger.info("[%s] %s", event_type, json.dumps(data, default=str))
-    with open(LOG_FILE, "a") as f:
-        f.write(json.dumps(entry, default=str) + "\n")
-
-
-def log_stt_event(ev: SpeechEvent):
-    """Log a raw STT event with all available data."""
-    if ev.type == SpeechEventType.START_OF_SPEECH:
-        log_event("START_OF_SPEECH")
-
-    elif ev.type == SpeechEventType.END_OF_SPEECH:
-        log_event("END_OF_SPEECH")
-
-    elif ev.type == SpeechEventType.RECOGNITION_USAGE:
-        log_event(
-            "RECOGNITION_USAGE",
-            audio_duration=ev.recognition_usage.audio_duration if ev.recognition_usage else None,
-        )
-
-    elif ev.type in (
-        SpeechEventType.INTERIM_TRANSCRIPT,
-        SpeechEventType.PREFLIGHT_TRANSCRIPT,
-        SpeechEventType.FINAL_TRANSCRIPT,
-    ):
-        alt = ev.alternatives[0] if ev.alternatives else None
-        if not alt:
-            return
-
-        words = None
-        if alt.words:
-            words = [
-                {
-                    "word": str(w),
-                    "start_time": w.start_time,
-                    "end_time": w.end_time,
-                    "confidence": w.confidence,
-                }
-                for w in alt.words
-            ]
-
-        log_event(
-            ev.type.value,
-            text=alt.text,
-            confidence=alt.confidence,
-            language=str(alt.language) if alt.language else None,
-            start_time=alt.start_time,
-            end_time=alt.end_time,
-            speaker_id=alt.speaker_id,
-            words=words,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Hotel Booking Agent
-# ---------------------------------------------------------------------------
 
 HOTEL_SYSTEM_PROMPT = """\
 You are the front desk at The Grandview Hotel in downtown San Francisco. \
@@ -138,32 +69,49 @@ booking from the top unless they ask.\
 
 
 class HotelBookingAgent(Agent):
-    def __init__(self) -> None:
+    def __init__(self, session_ctx: Session) -> None:
         super().__init__(instructions=HOTEL_SYSTEM_PROMPT)
+        self._ctx = session_ctx
 
     async def stt_node(
         self, audio: AsyncIterable[rtc.AudioFrame], model_settings: ModelSettings
     ):
-        async for ev in Agent.default.stt_node(self, audio, model_settings):
-            log_stt_event(ev)
+        async def tapped():
+            async for frame in audio:
+                self._ctx.recorder.feed_left(frame)
+                yield frame
+
+        async for ev in Agent.default.stt_node(self, tapped(), model_settings):
+            self._ctx.log_stt_event(ev)
             yield ev
+
+    async def tts_node(
+        self, text: AsyncIterable[str], model_settings: ModelSettings
+    ):
+        async for frame in Agent.default.tts_node(self, text, model_settings):
+            self._ctx.recorder.feed_right(frame)
+            yield frame
 
     @agents.function_tool()
     async def set_booking_mode(self, context: agents.RunContext[None]) -> str:
         """Call this before starting to collect booking details (name, dates, phone, email, credit card)."""
         # Flux v2 has no runtime analog to AAI's min/max_turn_silence. Logged as a no-op marker.
-        log_event("config_update", step="booking_mode", stt="deepgram", note="no-op")
+        self._ctx.log("config_update", step="booking_mode", stt="deepgram", note="no-op")
         return "Turn detection adjusted for booking detail collection. Proceed with collecting the caller's information."
 
     @agents.function_tool()
     async def set_general_mode(self, context: agents.RunContext[None]) -> str:
         """Call this after booking details are fully collected and confirmed."""
-        log_event("config_update", step="general_mode", stt="deepgram", note="no-op")
+        self._ctx.log("config_update", step="general_mode", stt="deepgram", note="no-op")
         return "Turn detection restored to general conversation settings."
 
 
 async def entrypoint(ctx: agents.JobContext):
     await ctx.connect()
+
+    session_ctx = Session(TRANSCRIPTS_DIR, vendor="deepgram")
+    session_ctx.recorder.start()
+    ctx.add_shutdown_callback(session_ctx.recorder.close)
 
     session = AgentSession(
         stt=deepgram.STTv2(
@@ -171,7 +119,7 @@ async def entrypoint(ctx: agents.JobContext):
             sample_rate=8000,
         ),
         tts=cartesia.TTS(model="sonic-3", voice="607167f6-9bf2-473c-accc-ac7b3b66b30b"),
-        llm=anthropic.LLM(model="claude-sonnet-4-5-20250929"),
+        llm=openai.LLM(model="gpt-4.1-nano"),
         vad=silero.VAD.load(
             activation_threshold=0.3
         ),
@@ -181,7 +129,8 @@ async def entrypoint(ctx: agents.JobContext):
             "interruption": {
                 "enabled": True,
                 "min_duration": 0.6,
-                "min_words": 2,
+                "mode": "vad",
+                # "min_words": 2,
                 "resume_false_interruption": True,
                 "false_interruption_timeout": 1.5,
             },
@@ -192,7 +141,7 @@ async def entrypoint(ctx: agents.JobContext):
 
     @session.on("user_state_changed")
     def _on_user_state(ev: UserStateChangedEvent):
-        log_event(
+        session_ctx.log(
             "user_state_changed",
             old=ev.old_state,
             new=ev.new_state,
@@ -201,7 +150,7 @@ async def entrypoint(ctx: agents.JobContext):
 
     @session.on("agent_state_changed")
     def _on_agent_state(ev: AgentStateChangedEvent):
-        log_event(
+        session_ctx.log(
             "agent_state_changed",
             old=ev.old_state,
             new=ev.new_state,
@@ -210,7 +159,7 @@ async def entrypoint(ctx: agents.JobContext):
 
     @session.on("user_input_transcribed")
     def _on_user_input(ev: UserInputTranscribedEvent):
-        log_event(
+        session_ctx.log(
             "user_input_transcribed",
             transcript=ev.transcript,
             is_final=ev.is_final,
@@ -219,7 +168,7 @@ async def entrypoint(ctx: agents.JobContext):
 
     @session.on("agent_false_interruption")
     def _on_false_interruption(ev: AgentFalseInterruptionEvent):
-        log_event(
+        session_ctx.log(
             "agent_false_interruption",
             resumed=ev.resumed,
             created_at=ev.created_at,
@@ -227,7 +176,7 @@ async def entrypoint(ctx: agents.JobContext):
 
     @session.on("speech_created")
     def _on_speech_created(ev: SpeechCreatedEvent):
-        log_event(
+        session_ctx.log(
             "speech_created",
             source=ev.source,
             user_initiated=ev.user_initiated,
@@ -235,7 +184,7 @@ async def entrypoint(ctx: agents.JobContext):
 
     await session.start(
         room=ctx.room,
-        agent=HotelBookingAgent(),
+        agent=HotelBookingAgent(session_ctx),
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
                 noise_cancellation=noise_cancellation.BVCTelephony(),
@@ -243,7 +192,7 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
 
-    log_event("session_started", room=ctx.room.name)
+    session_ctx.log("session_started", room=ctx.room.name)
 
     await session.generate_reply(
         instructions='Say exactly: "I\'m from The Grandview Hotel, how can I help?"'
